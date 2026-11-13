@@ -130,6 +130,83 @@ class SpaFrameParser {
   uint32_t ok_{0}, bad_{0}, resyncs_{0}, overflows_{0};
 };
 
+
+// ---------------------------------------------------------------------------------------------
+// Transmit side helpers
+// ---------------------------------------------------------------------------------------------
+
+// Build the wire bytes of a frame: 02 | type | payload | 03 | check, escaping 02, 03 and 10 in the body with 10.
+// Returns the number of bytes written, or 0 if it does not fit or the check byte would itself need escaping
+// (never seen on the bus, so we refuse to send it).
+static inline size_t spa_encode_frame(uint8_t type, const uint8_t *payload, size_t len, uint8_t *out, size_t cap) {
+  size_t n = 0;
+  uint8_t x = type;
+  for (size_t i = 0; i < len; i++)
+    x ^= payload[i];
+  auto put = [&](uint8_t b) -> bool {
+    if (b == SPA_STX || b == SPA_ETX || b == SPA_DLE) {
+      if (n >= cap)
+        return false;
+      out[n++] = SPA_DLE;
+    }
+    if (n >= cap)
+      return false;
+    out[n++] = b;
+    return true;
+  };
+  if (cap < 1)
+    return 0;
+  out[n++] = SPA_STX;
+  if (!put(type))
+    return 0;
+  for (size_t i = 0; i < len; i++)
+    if (!put(payload[i]))
+      return 0;
+  if (n + 2 > cap)
+    return 0;
+  if (x == SPA_STX || x == SPA_ETX || x == SPA_DLE)
+    return 0;
+  out[n++] = SPA_ETX;
+  out[n++] = x;
+  return n;
+}
+
+// Key frame (type 80) with the three payload bytes seen on the bus.
+static inline size_t spa_encode_key(uint8_t b0, uint8_t b1, uint8_t b2, uint8_t *out, size_t cap) {
+  const uint8_t payload[3] = {b0, b1, b2};
+  return spa_encode_frame(0x80, payload, 3, out, cap);
+}
+
+enum class SpaKey : uint8_t { PUMP1 = 0, PUMP2 = 1, AUX = 2 };
+
+// Key payload bytes 0 and 1 for the keys we can send (byte 2 is 01 on every key-down seen).
+static inline void spa_key_bytes(SpaKey k, uint8_t *b0, uint8_t *b1) {
+  switch (k) {
+    case SpaKey::PUMP1:
+      *b0 = 0x10;
+      *b1 = 0x00;
+      break;
+    case SpaKey::PUMP2:
+      *b0 = 0x20;
+      *b1 = 0x00;
+      break;
+    case SpaKey::AUX:
+      *b0 = 0x00;
+      *b1 = 0x04;
+      break;
+  }
+}
+
+// What the controller currently reports (decoded from the status frame and the display text).
+struct SpaState {
+  bool known{false};    // at least one status frame decoded
+  uint8_t pump1{0};     // 0 off, 1 auto, 2 on (the pump key cycles off -> auto -> on -> off)
+  bool pump2{false};
+  bool aux{false};
+  bool ui_known{false};  // at least one display frame seen, so ui_busy is meaningful
+  bool ui_busy{false};   // a menu, edit or adjust screen is showing: pump and aux keys may mean something else
+};
+
 // Values that changed because of one frame. Only fields with has_* set should be published.
 struct SpaUpdate {
   bool has_current_temp{false};
@@ -166,12 +243,16 @@ struct SpaUpdate {
 
 class SpaDecoder {
  public:
+  const SpaState &state() const { return state_; }
+
   void process(const SpaFrame &f, SpaUpdate &u) {
     switch (f.type) {
       case 0x22:  // display line 1 (15 ASCII chars); normally starts a display burst
         line1_ = ascii_(f.payload, f.len);
         line2_.clear();
         have_line2_ = false;
+        state_.ui_known = true;
+        state_.ui_busy = line1_.find("(^)") != std::string::npos;  // menu navigation line
         handle_line1_(f, u);
         break;
       case 0x27:  // takes the place of line 1 on the LIGHT ADJUST screen
@@ -179,11 +260,19 @@ class SpaDecoder {
         line1_.clear();
         line2_.clear();
         have_line2_ = false;
+        state_.ui_known = true;
+        state_.ui_busy = true;
         break;
       case 0x21: {  // display line 2
         std::string raw = ascii_(f.payload, f.len);
         line2_ = raw;
         have_line2_ = true;
+        {
+          std::string up2 = upper_(raw);
+          if (up2.find("LIGHT MODE") != std::string::npos || up2.find("LIGHT ADJUST") != std::string::npos ||
+              up2.find("MAIN MENU") != std::string::npos || up2.find("SET TEMP") != std::string::npos)
+            state_.ui_busy = true;
+        }
         std::string t = trim_(raw);
         if (t != last_line2_ || !pub_line2_) {
           last_line2_ = t;
@@ -413,6 +502,10 @@ class SpaDecoder {
     }
     // AUX (display "AUX ON" / "AUX OFF"): b2 bit 0x80.
     bool aux = (f.payload[2] & 0x80) != 0;
+    state_.known = true;
+    state_.pump1 = !pump_running ? 0 : ((f.payload[3] & 0x04) ? 1 : 2);
+    state_.pump2 = pump2;
+    state_.aux = aux;
     if (!pub_aux_ || aux != last_aux_) {
       pub_aux_ = true;
       last_aux_ = aux;
@@ -475,6 +568,7 @@ class SpaDecoder {
     }
   }
 
+  SpaState state_;
   std::string line1_, line2_, last_line1_, last_line2_, last_status_raw_, last_key_, last_pump_, last_color_;
   bool have_line2_{false};
   bool pub_line1_{false}, pub_line2_{false}, pub_set_{false}, pub_current_{false}, pub_light_{false},
@@ -485,6 +579,260 @@ class SpaDecoder {
   uint8_t last_status_bytes_[SPA_MAX_BODY]{};
   size_t last_status_len_{0};
   std::map<uint8_t, std::string> last_other_;
+};
+
+
+// Presses keys on request. All timing comes from the caller (milliseconds and loop gap), so it can be tested on a PC.
+//
+// A key press is two frames, like the real keypad: key-down, then about 150 ms later the release frame
+// (payload 00 00 00). Each frame may only start in the reply slot right after a status (type 30) frame:
+// the real keypad starts 0 to 2 ms after the status frame ends and the controller waits for it, so
+// on_slot() only transmits when the caller says it is being called within max_latency_us of the frame end.
+class SpaTxSequencer {
+ public:
+  void configure(uint32_t hold_ms, uint32_t response_timeout_ms, uint32_t max_latency_us) {
+    hold_ms_ = hold_ms;
+    response_timeout_ms_ = response_timeout_ms;
+    max_latency_us_ = max_latency_us;
+  }
+
+  // Number of key presses needed to reach the target pump 1 mode (the key cycles off -> auto -> on -> off).
+  static int pump1_presses(uint8_t current, uint8_t target) { return (3 + (int) target - (int) current) % 3; }
+
+  bool request_pump1(uint8_t target, const SpaState &st, uint32_t now) {
+    if (!precheck_(st))
+      return false;
+    if (target > 2) {
+      error_ = "bad pump mode";
+      return false;
+    }
+    if (st.pump1 == target)
+      return true;
+    start_(Goal::PUMP1, SpaKey::PUMP1, target, 5, now);
+    return true;
+  }
+
+  bool request_toggle(SpaKey key, bool target, const SpaState &st, uint32_t now) {
+    if (!precheck_(st))
+      return false;
+    if (key == SpaKey::PUMP1) {
+      error_ = "use request_pump1";
+      return false;
+    }
+    bool cur = key == SpaKey::PUMP2 ? st.pump2 : st.aux;
+    if (cur == target)
+      return true;
+    start_(key == SpaKey::PUMP2 ? Goal::PUMP2 : Goal::AUX, key, target ? 1 : 0, 3, now);
+    return true;
+  }
+
+  // One raw press with no target (for the button entities).
+  bool press_raw(SpaKey key, const SpaState &st, uint32_t now) {
+    if (!precheck_(st))
+      return false;
+    start_(Goal::RAW, key, 0, 1, now);
+    return true;
+  }
+
+  bool busy() const { return phase_ != IDLE; }
+  const char *error() const { return error_; }
+  uint32_t late_skips() const { return late_skips_; }
+  uint32_t frames_sent() const { return frames_sent_; }
+
+  bool take_result(std::string *msg) {
+    if (!have_result_)
+      return false;
+    have_result_ = false;
+    *msg = result_;
+    return true;
+  }
+  bool last_ok() const { return last_ok_; }
+
+  // Call every loop pass.
+  void tick(uint32_t now, const SpaState &st) { update_(now, st); }
+
+  // Call when a type 30 frame has just completed and nothing else has arrived yet. loop_gap_us is how long it was
+  // since the previous loop pass: the frame ended at most that long ago. Returns true if out[0..*len) must be sent now.
+  bool on_slot(uint32_t now, uint32_t loop_gap_us, const SpaState &st, uint8_t *out, size_t cap, size_t *len) {
+    update_(now, st);
+    if (phase_ != NEED_DOWN && phase_ != NEED_UP)
+      return false;
+    if (loop_gap_us > max_latency_us_) {
+      late_skips_++;
+      return false;
+    }
+    if (phase_ == NEED_UP) {
+      *len = spa_encode_key(0, 0, 0, out, cap);
+      if (*len == 0)
+        return false;
+      set_phase_(AWAIT, now);
+      frames_sent_++;
+      return true;
+    }
+    // NEED_DOWN
+    if ((uint32_t) (now - last_done_ms_) < COOLDOWN_MS)
+      return false;
+    if (goal_ != Goal::RAW && satisfied_(st)) {  // state changed by itself while we waited
+      finish_ok_(now);
+      return false;
+    }
+    if (!st.ui_known || st.ui_busy)
+      return false;  // wait for a display frame; update_() gives up after SLOT_TIMEOUT_MS
+    uint8_t b0 = 0, b1 = 0;
+    spa_key_bytes(key_, &b0, &b1);
+    *len = spa_encode_key(b0, b1, 0x01, out, cap);
+    if (*len == 0) {
+      fail_("cannot encode key frame");
+      return false;
+    }
+    before_ = st;
+    effect_ = false;
+    t_down_ = now;
+    attempts_left_--;
+    presses_++;
+    set_phase_(HOLD, now);
+    frames_sent_++;
+    return true;
+  }
+
+ protected:
+  enum Phase : uint8_t { IDLE, NEED_DOWN, HOLD, NEED_UP, AWAIT };
+  enum class Goal : uint8_t { NONE, PUMP1, PUMP2, AUX, RAW };
+  static const uint32_t COOLDOWN_MS = 300;
+  static const uint32_t BUSY_TIMEOUT_MS = 5000;
+  static const uint32_t SLOT_TIMEOUT_MS = 5000;
+
+  bool precheck_(const SpaState &st) {
+    if (phase_ != IDLE) {
+      error_ = "another key action is still running";
+      return false;
+    }
+    if (!st.known) {
+      error_ = "no status frame seen yet";
+      return false;
+    }
+    error_ = "";
+    return true;
+  }
+
+  void start_(Goal g, SpaKey key, uint8_t target, uint8_t attempts, uint32_t now) {
+    goal_ = g;
+    key_ = key;
+    target_ = target;
+    attempts_left_ = attempts;
+    presses_ = 0;
+    started_ms_ = now;
+    last_done_ms_ = now - COOLDOWN_MS;  // first press may go straight away
+    set_phase_(NEED_DOWN, now);
+  }
+
+  void set_phase_(Phase p, uint32_t now) {
+    phase_ = p;
+    phase_since_ms_ = now;
+    skips_at_phase_start_ = late_skips_;
+  }
+
+  bool satisfied_(const SpaState &st) const {
+    switch (goal_) {
+      case Goal::PUMP1:
+        return st.pump1 == target_;
+      case Goal::PUMP2:
+        return st.pump2 == (target_ != 0);
+      case Goal::AUX:
+        return st.aux == (target_ != 0);
+      default:
+        return true;
+    }
+  }
+
+  bool changed_(const SpaState &st) const {
+    switch (key_) {
+      case SpaKey::PUMP1:
+        return st.pump1 != before_.pump1;
+      case SpaKey::PUMP2:
+        return st.pump2 != before_.pump2;
+      case SpaKey::AUX:
+        return st.aux != before_.aux;
+    }
+    return false;
+  }
+
+  void update_(uint32_t now, const SpaState &st) {
+    switch (phase_) {
+      case NEED_DOWN:
+      case NEED_UP:
+        if ((uint32_t) (now - phase_since_ms_) > SLOT_TIMEOUT_MS) {
+          if (late_skips_ != skips_at_phase_start_)
+            fail_("no reply slot was fast enough (loop too slow)");
+          else if (!st.ui_known)
+            fail_("no display frame seen, cannot tell if a menu is open");
+          else if (st.ui_busy)
+            fail_("keypad menu is open, not sending");
+          else
+            fail_("no reply slot available");
+        }
+        break;
+      case HOLD:
+        if (!effect_ && changed_(st))
+          effect_ = true;
+        if ((uint32_t) (now - t_down_) >= hold_ms_)
+          set_phase_(NEED_UP, now);
+        break;
+      case AWAIT:
+        if (!effect_ && changed_(st))
+          effect_ = true;
+        if (effect_) {
+          last_done_ms_ = now;
+          if (goal_ == Goal::RAW || satisfied_(st))
+            finish_ok_(now);
+          else if (attempts_left_ > 0)
+            set_phase_(NEED_DOWN, now);
+          else
+            fail_("target state not reached");
+        } else if ((uint32_t) (now - t_down_) >= response_timeout_ms_) {
+          last_done_ms_ = now;
+          if (attempts_left_ > 0)
+            set_phase_(NEED_DOWN, now);  // no response: try again
+          else
+            fail_("no response to the key press");
+        }
+        break;
+      default:
+        break;
+    }
+  }
+
+  void finish_ok_(uint32_t now) {
+    char buf[64];
+    snprintf(buf, sizeof(buf), "done after %d press(es), %u ms", presses_, (unsigned) (now - started_ms_));
+    result_ = buf;
+    last_ok_ = true;
+    have_result_ = true;
+    phase_ = IDLE;
+  }
+
+  void fail_(const char *why) {
+    result_ = why;
+    error_ = why;
+    last_ok_ = false;
+    have_result_ = true;
+    phase_ = IDLE;
+  }
+
+  Phase phase_{IDLE};
+  Goal goal_{Goal::NONE};
+  SpaKey key_{SpaKey::PUMP1};
+  uint8_t target_{0};
+  int presses_{0};
+  int attempts_left_{0};
+  uint32_t hold_ms_{150}, response_timeout_ms_{800}, max_latency_us_{1500};
+  uint32_t started_ms_{0}, t_down_{0}, last_done_ms_{0}, phase_since_ms_{0}, skips_at_phase_start_{0};
+  bool effect_{false};
+  SpaState before_;
+  const char *error_{""};
+  std::string result_;
+  bool have_result_{false}, last_ok_{false};
+  uint32_t late_skips_{0}, frames_sent_{0};
 };
 
 }  // namespace spa_power
