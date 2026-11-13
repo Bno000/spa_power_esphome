@@ -4,9 +4,6 @@
 esphome:
   name: spa-power
   on_boot:
-    priority: 600
-    then:
-      - output.turn_off: rs485_de_re
 
 esp32:
   board: esp32-s3-devkitc-1      # change to your board
@@ -32,11 +29,6 @@ external_components:
       url: https://github.com/Bno000/spa_power_esphome
     refresh: 0s
 
-# RS485 transceiver: RO -> rx_pin. Tie DE and RE̅ low (receive only), or drive them low as below.
-output:
-  - platform: gpio
-    pin: GPIO0
-    id: rs485_de_re
 
 
 uart:
@@ -48,6 +40,7 @@ uart:
   parity: NONE
   stop_bits: 1
   rx_buffer_size: 1024
+  flow_control_pin: GPIO0
 
 spa_power:
   id: spa
