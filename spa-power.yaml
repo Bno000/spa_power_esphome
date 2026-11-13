@@ -45,6 +45,15 @@ uart:
 spa_power:
   id: spa
   uart_id: spa_uart
+  # Sending is off unless transmit is true. While dry_run is true the controls only log the key frames they
+  # would send. Check the log first, then set dry_run: false to send for real.
+  transmit: true
+  dry_run: false
+  # Optional timing (defaults shown):
+  # key_hold: 150ms              # time between key-down and the release frame
+  # response_timeout: 800ms      # how long to wait for the status frame to change after a press
+  # max_reply_latency: 1500us    # only send in the reply slot if the loop was at least this fast
+  # key_spacing: 400ms           # minimum time between key presses
 
 sensor:
   - platform: spa_power
@@ -83,6 +92,8 @@ text_sensor:
       name: "Spa Pump"
     light_color:
       name: "Spa Light Colour (experimental)"
+    big_digits:
+      name: "Spa Big Digits"
     status_raw:
       name: "Spa Status Raw"
       entity_category: diagnostic
@@ -102,10 +113,18 @@ switch:
     aux:
       name: "Spa Aux"
  
-# Raw single key presses, handy for testing one key at a time.
+# Single key presses. up, down and select are the keypad's navigation keys: they work on any screen and do what the
+# controller's current screen says. To change the setpoint: select, up, select, then up or down (0.25 C each),
+# then select. Quick taps are queued (up to 16) and spaced out by key_spacing.
 button:
   - platform: spa_power
     spa_power_id: spa
+    up:
+      name: "Spa Up"
+    down:
+      name: "Spa Down"
+    select:
+      name: "Spa Select"
     pump:
       name: "Spa Pump Key"
     pump2:
