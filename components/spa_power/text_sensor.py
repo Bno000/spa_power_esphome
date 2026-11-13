@@ -9,6 +9,7 @@ CONF_LINE2 = "line2"
 CONF_KEY = "key"
 CONF_PUMP_STATE = "pump_state"
 CONF_STATUS_RAW = "status_raw"
+CONF_LIGHT_COLOR = "light_color"
 
 CONFIG_SCHEMA = cv.Schema(
     {
@@ -18,6 +19,7 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_KEY): text_sensor.text_sensor_schema(icon="mdi:keyboard"),
         cv.Optional(CONF_PUMP_STATE): text_sensor.text_sensor_schema(icon="mdi:pump"),
         cv.Optional(CONF_STATUS_RAW): text_sensor.text_sensor_schema(icon="mdi:code-array"),
+        cv.Optional(CONF_LIGHT_COLOR): text_sensor.text_sensor_schema(icon="mdi:palette"),
     }
 )
 
@@ -30,6 +32,7 @@ async def to_code(config):
         (CONF_KEY, hub.set_key_text_sensor),
         (CONF_PUMP_STATE, hub.set_pump_state_text_sensor),
         (CONF_STATUS_RAW, hub.set_status_raw_text_sensor),
+        (CONF_LIGHT_COLOR, hub.set_light_color_text_sensor),
     ):
         if conf := config.get(key):
             sens = await text_sensor.new_text_sensor(conf)
