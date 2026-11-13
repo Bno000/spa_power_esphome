@@ -63,6 +63,20 @@ sensor:
     light_level:
       name: "Spa Light Level"
  
+binary_sensor:
+  - platform: spa_power
+    spa_power_id: spa
+    pump_running:
+      name: "Spa Pump Running"
+    heater:
+      name: "Spa Heater"
+    ozone:
+      name: "Spa Ozone"
+    pump2_running:
+      name: "Spa Pump 2 Running"
+    aux:
+      name: "Spa Aux"
+ 
 text_sensor:
   - platform: spa_power
     spa_power_id: spa
@@ -79,3 +93,4 @@ text_sensor:
     status_raw:
       name: "Spa Status Raw"
       entity_category: diagnostic
+ 
