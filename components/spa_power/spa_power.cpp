@@ -35,6 +35,8 @@ void SpaPowerComponent::loop() {
 }
 
 void SpaPowerComponent::publish_(const SpaUpdate &u) {
+  for (const auto &n : u.notes)
+    ESP_LOGI(TAG, "%s", n.c_str());
   if (u.has_current_temp && this->current_temperature_ != nullptr)
     this->current_temperature_->publish_state(u.current_temp);
   if (u.has_set_temp && this->set_temperature_ != nullptr)
@@ -51,6 +53,8 @@ void SpaPowerComponent::publish_(const SpaUpdate &u) {
     this->pump_state_->publish_state(u.pump);
   if (u.has_status_raw && this->status_raw_ != nullptr)
     this->status_raw_->publish_state(u.status_raw);
+  if (u.has_light_color && this->light_color_ != nullptr)
+    this->light_color_->publish_state(u.light_color);
 }
 
 void SpaPowerComponent::dump_config() {
@@ -61,7 +65,8 @@ void SpaPowerComponent::dump_config() {
   LOG_TEXT_SENSOR("  ", "Line 1", this->line1_);
   LOG_TEXT_SENSOR("  ", "Line 2", this->line2_);
   LOG_TEXT_SENSOR("  ", "Key", this->key_);
-  LOG_TEXT_SENSOR("  ", "Pump state (experimental)", this->pump_state_);
+  LOG_TEXT_SENSOR("  ", "Pump state", this->pump_state_);
+  LOG_TEXT_SENSOR("  ", "Light colour (experimental)", this->light_color_);
   LOG_TEXT_SENSOR("  ", "Status raw", this->status_raw_);
   this->check_uart_settings(19200, 1, uart::UART_CONFIG_PARITY_NONE, 8);
 }
