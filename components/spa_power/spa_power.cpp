@@ -55,6 +55,16 @@ void SpaPowerComponent::publish_(const SpaUpdate &u) {
     this->status_raw_->publish_state(u.status_raw);
   if (u.has_light_color && this->light_color_ != nullptr)
     this->light_color_->publish_state(u.light_color);
+  if (u.has_pump_running && this->pump_running_ != nullptr)
+    this->pump_running_->publish_state(u.pump_running);
+  if (u.has_heater && this->heater_ != nullptr)
+    this->heater_->publish_state(u.heater);
+  if (u.has_ozone && this->ozone_ != nullptr)
+    this->ozone_->publish_state(u.ozone);
+  if (u.has_pump2_running && this->pump2_running_ != nullptr)
+    this->pump2_running_->publish_state(u.pump2_running);
+  if (u.has_aux && this->aux_ != nullptr)
+    this->aux_->publish_state(u.aux);
 }
 
 void SpaPowerComponent::dump_config() {
@@ -68,6 +78,11 @@ void SpaPowerComponent::dump_config() {
   LOG_TEXT_SENSOR("  ", "Pump state", this->pump_state_);
   LOG_TEXT_SENSOR("  ", "Light colour (experimental)", this->light_color_);
   LOG_TEXT_SENSOR("  ", "Status raw", this->status_raw_);
+  LOG_BINARY_SENSOR("  ", "Pump running", this->pump_running_);
+  LOG_BINARY_SENSOR("  ", "Heater", this->heater_);
+  LOG_BINARY_SENSOR("  ", "Ozone", this->ozone_);
+  LOG_BINARY_SENSOR("  ", "Pump 2 running", this->pump2_running_);
+  LOG_BINARY_SENSOR("  ", "Aux", this->aux_);
   this->check_uart_settings(19200, 1, uart::UART_CONFIG_PARITY_NONE, 8);
 }
 
