@@ -1,0 +1,77 @@
+# Read-only Spa Power SP800/SP1200 keypad bus monitor.
+# Put the "components" folder next to this file.
+
+esphome:
+  name: spa-power
+  on_boot:
+    priority: 600
+    then:
+      - output.turn_off: rs485_de_re
+
+esp32:
+  board: esp32-s3-devkitc-1      # change to your board
+  framework:
+    type: esp-idf
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+api:
+ota:
+  - platform: esphome
+
+# On an ESP32-S3 with native USB, keep the logger off the pins used below.
+logger:
+  hardware_uart: USB_SERIAL_JTAG
+  level: DEBUG
+
+external_components:
+  - source:
+      type: local
+      path: components
+    components: [spa_power]
+
+# RS485 transceiver: RO -> rx_pin. Tie DE and RE̅ low (receive only), or drive them low as below.
+output:
+  - platform: gpio
+    pin: GPIO4
+    id: rs485_de_re
+
+uart:
+  id: spa_uart
+  rx_pin: GPIO16                 # change to the pin wired to the transceiver's RO
+  baud_rate: 19200
+  data_bits: 8
+  parity: NONE
+  stop_bits: 1
+  rx_buffer_size: 1024
+
+spa_power:
+  id: spa
+  uart_id: spa_uart
+
+sensor:
+  - platform: spa_power
+    spa_power_id: spa
+    current_temperature:
+      name: "Spa Current Temperature"
+    set_temperature:
+      name: "Spa Set Temperature"
+    light_level:
+      name: "Spa Light Level"
+
+text_sensor:
+  - platform: spa_power
+    spa_power_id: spa
+    line1:
+      name: "Spa Display Line 1"
+    line2:
+      name: "Spa Display Line 2"
+    key:
+      name: "Spa Last Key"
+    pump_state:
+      name: "Spa Pump (experimental)"
+    status_raw:
+      name: "Spa Status Raw"
+      entity_category: diagnostic
