@@ -1,4 +1,4 @@
-# spa_power
+# Spa Power SP800 ESPHome COmponent
 
 An ESPHome component for the keypad bus of a Spa Power SP800 spa pack (the keypad is believed to be an SP1200 type).
 It listens to the bus and publishes the spa's state to Home Assistant, and it can press the keypad's keys for you,
@@ -51,7 +51,7 @@ Copy the `components/` folder next to your YAML, or pull it from GitHub:
 external_components:
   - source:
       type: git
-      url: https://github.com/YOUR_USER/spa-power-esphome   # replace with your repository
+      url: https://github.com/Bno000/spa_power_esphome
     components: [spa_power]
 ```
 
