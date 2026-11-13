@@ -150,6 +150,16 @@ struct SpaUpdate {
   std::string status_raw;
   bool has_light_color{false};
   std::string light_color;
+  bool has_pump_running{false};
+  bool pump_running{false};
+  bool has_heater{false};
+  bool heater{false};
+  bool has_ozone{false};
+  bool ozone{false};
+  bool has_pump2_running{false};
+  bool pump2_running{false};
+  bool has_aux{false};
+  bool aux{false};
   // Human readable change log lines (status bit diffs, other frame changes, key presses) for state mapping.
   std::vector<std::string> notes;
 };
@@ -362,14 +372,52 @@ class SpaDecoder {
       u.has_light = true;
       u.light_percent = pct;
     }
-    // EXPERIMENTAL: seen only for one pump (OFF / AUTO / LOW) in a handful of captures.
-    bool on = (f.payload[2] & 0x03) == 0x03 && (f.payload[3] & 0x30) == 0x30;
-    const char *pump = !on ? "off" : ((f.payload[3] & 0x04) ? "auto" : "low");
+    // Output bits in the status frame. Mapped from a live capture out of demo mode (one run):
+    //   pump key OFF -> AUTO -> ON: b2 bit 0x02 and b3 bit 0x10 mean the pump is running, b3 bit 0x04 means AUTO.
+    //   About 6 s after the pump came on: b1 bit 0x08 = heater (heating LED). About 3 s later: b2 bit 0x40 = ozone.
+    bool pump_running = (f.payload[2] & 0x02) && (f.payload[3] & 0x10);
+    const char *pump = !pump_running ? "off" : ((f.payload[3] & 0x04) ? "auto" : "on");
     if (last_pump_ != pump || !pub_pump_) {
       last_pump_ = pump;
       pub_pump_ = true;
       u.has_pump = true;
       u.pump = pump;
+    }
+    if (!pub_pump_running_ || pump_running != last_pump_running_) {
+      pub_pump_running_ = true;
+      last_pump_running_ = pump_running;
+      u.has_pump_running = true;
+      u.pump_running = pump_running;
+    }
+    bool heater = (f.payload[1] & 0x08) != 0;
+    if (!pub_heater_ || heater != last_heater_) {
+      pub_heater_ = true;
+      last_heater_ = heater;
+      u.has_heater = true;
+      u.heater = heater;
+    }
+    bool ozone = (f.payload[2] & 0x40) != 0;
+    if (!pub_ozone_ || ozone != last_ozone_) {
+      pub_ozone_ = true;
+      last_ozone_ = ozone;
+      u.has_ozone = true;
+      u.ozone = ozone;
+    }
+    // Second pump (display "PUMP ON" / "PUMP OFF", two states): b2 bit 0x01 and b3 bit 0x20.
+    bool pump2 = (f.payload[2] & 0x01) && (f.payload[3] & 0x20);
+    if (!pub_pump2_ || pump2 != last_pump2_) {
+      pub_pump2_ = true;
+      last_pump2_ = pump2;
+      u.has_pump2_running = true;
+      u.pump2_running = pump2;
+    }
+    // AUX (display "AUX ON" / "AUX OFF"): b2 bit 0x80.
+    bool aux = (f.payload[2] & 0x80) != 0;
+    if (!pub_aux_ || aux != last_aux_) {
+      pub_aux_ = true;
+      last_aux_ = aux;
+      u.has_aux = true;
+      u.aux = aux;
     }
   }
 
@@ -404,12 +452,14 @@ class SpaDecoder {
       name = "up";
     else if (b1 == 0 && b0 == 0x10)
       name = "pump1";
+    else if (b1 == 0 && b0 == 0x20)
+      name = "pump2";  // display shows PUMP ON / PUMP OFF
     else if (b1 == 0 && b0 == 0x40)
       name = "light_mode";
     else if (b0 == 0 && b1 == 0x01)
       name = "light";
-    else if (b0 == 0 && b1 == 0x02)
-      name = "pump2a";  // label as given; no response seen on this hardware
+    else if (b0 == 0 && b1 == 0x04)
+      name = "aux";  // display shows AUX ON / AUX OFF
     else {
       char buf[24];
       snprintf(buf, sizeof(buf), "unknown_%02x_%02x", b0, b1);
@@ -428,7 +478,9 @@ class SpaDecoder {
   std::string line1_, line2_, last_line1_, last_line2_, last_status_raw_, last_key_, last_pump_, last_color_;
   bool have_line2_{false};
   bool pub_line1_{false}, pub_line2_{false}, pub_set_{false}, pub_current_{false}, pub_light_{false},
-      pub_status_{false}, pub_pump_{false}, pub_key_{false}, pub_color_{false};
+      pub_status_{false}, pub_pump_{false}, pub_key_{false}, pub_color_{false}, pub_pump_running_{false},
+      pub_heater_{false}, pub_ozone_{false}, pub_pump2_{false}, pub_aux_{false};
+  bool last_pump_running_{false}, last_heater_{false}, last_ozone_{false}, last_pump2_{false}, last_aux_{false};
   float last_set_{0}, last_current_{0}, last_light_{0};
   uint8_t last_status_bytes_[SPA_MAX_BODY]{};
   size_t last_status_len_{0};
