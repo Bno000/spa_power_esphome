@@ -98,6 +98,17 @@ text_sensor:
       name: "Spa Status Raw"
       entity_category: diagnostic
  
+# Target temperature: sets the setpoint by driving the keypad (select, up, select, arrows, select) and checking the
+# screen and the number after every key. min_value and max_value are required: the control never asks for anything
+# outside them. The value shown is what the controller reports.
+number:
+  - platform: spa_power
+    spa_power_id: spa
+    set_temperature:
+      name: "Spa Target Temperature"
+      min_value: 20
+      max_value: 38
+ 
 # Controls. The state shown is always what the controller reports, not what was commanded.
 select:
   - platform: spa_power
@@ -131,4 +142,3 @@ button:
       name: "Spa Pump 2 Key"
     aux:
       name: "Spa Aux Key"
- 
