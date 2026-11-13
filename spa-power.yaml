@@ -94,3 +94,29 @@ text_sensor:
       name: "Spa Status Raw"
       entity_category: diagnostic
  
+# Controls. The state shown is always what the controller reports, not what was commanded.
+select:
+  - platform: spa_power
+    spa_power_id: spa
+    pump:
+      name: "Spa Pump Mode"      # off / auto / on
+ 
+switch:
+  - platform: spa_power
+    spa_power_id: spa
+    pump2:
+      name: "Spa Pump 2"
+    aux:
+      name: "Spa Aux"
+ 
+# Raw single key presses, handy for testing one key at a time.
+button:
+  - platform: spa_power
+    spa_power_id: spa
+    pump:
+      name: "Spa Pump Key"
+    pump2:
+      name: "Spa Pump 2 Key"
+    aux:
+      name: "Spa Aux Key"
+ 
