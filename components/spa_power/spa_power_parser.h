@@ -299,7 +299,7 @@ class SpaDecoder {
         break;
       }
       case 0x20:  // takes the place of type 25 on the MAIN MENU screen
-        emit_digits_("20", f, u);
+        handle_menu_digits_(f, u);
         break;
       case 0x25:
         handle_temperature_(f, u);
@@ -437,10 +437,21 @@ class SpaDecoder {
 
   // The keypad has a big four-digit numeric display. Each display burst is four slots: line 1 (type 22, or 27 on the
   // light adjust screen, or 23 at the start of edit mode), line 2 (21), the digits (type 25, or 20 on the main menu)
-  // and a flags byte (28). Type 25 carries a temperature (current, or the setpoint on the SET TEMP screens). Type 20
-  // is not decoded yet, so it is published as raw bytes to compare with what the digits really show.
-  void emit_digits_(const char *tag, const SpaFrame &f, SpaUpdate &u) {
-    std::string d = std::string("raw ") + tag + ": " + hex_(f.payload, f.len);
+  // and a flags byte (28). Type 25 carries a temperature (current, or the setpoint on the SET TEMP screens).
+  // Type 20 carries one byte per digit: 81 is a dash (the main menu shows ----). Other digit codes have not been
+  // seen yet, so they are shown as [xx] to be mapped; the fifth byte (00 so far) is not used.
+  void handle_menu_digits_(const SpaFrame &f, SpaUpdate &u) {
+    std::string d;
+    size_t n = f.len < 4 ? f.len : 4;
+    char buf[8];
+    for (size_t i = 0; i < n; i++) {
+      if (f.payload[i] == 0x81) {
+        d += '-';
+      } else {
+        snprintf(buf, sizeof(buf), "[%02x]", f.payload[i]);
+        d += buf;
+      }
+    }
     set_digits_(d, u);
   }
   void set_digits_(const std::string &d, SpaUpdate &u) {
