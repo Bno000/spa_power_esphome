@@ -177,7 +177,9 @@ static inline size_t spa_encode_key(uint8_t b0, uint8_t b1, uint8_t b2, uint8_t 
   return spa_encode_frame(0x80, payload, 3, out, cap);
 }
 
-enum class SpaKey : uint8_t { PUMP1 = 0, PUMP2 = 1, AUX = 2 };
+// PUMP1/PUMP2/AUX change the spa's outputs. UP/DOWN/SELECT are the keypad's navigation keys (select is the main
+// menu / set key): they do whatever the controller's current screen makes them do.
+enum class SpaKey : uint8_t { PUMP1 = 0, PUMP2 = 1, AUX = 2, UP = 3, DOWN = 4, SELECT = 5 };
 
 // Key payload bytes 0 and 1 for the keys we can send (byte 2 is 01 on every key-down seen).
 static inline void spa_key_bytes(SpaKey k, uint8_t *b0, uint8_t *b1) {
@@ -193,6 +195,18 @@ static inline void spa_key_bytes(SpaKey k, uint8_t *b0, uint8_t *b1) {
     case SpaKey::AUX:
       *b0 = 0x00;
       *b1 = 0x04;
+      break;
+    case SpaKey::UP:
+      *b0 = 0x04;
+      *b1 = 0x00;
+      break;
+    case SpaKey::DOWN:
+      *b0 = 0x01;
+      *b1 = 0x00;
+      break;
+    case SpaKey::SELECT:
+      *b0 = 0x02;
+      *b1 = 0x00;
       break;
   }
 }
@@ -227,6 +241,8 @@ struct SpaUpdate {
   std::string status_raw;
   bool has_light_color{false};
   std::string light_color;
+  bool has_digits{false};
+  std::string digits;  // what the big numeric display is being told to show (see handle_digits_)
   bool has_pump_running{false};
   bool pump_running{false};
   bool has_heater{false};
@@ -282,6 +298,9 @@ class SpaDecoder {
         }
         break;
       }
+      case 0x20:  // takes the place of type 25 on the MAIN MENU screen
+        emit_digits_("20", f, u);
+        break;
       case 0x25:
         handle_temperature_(f, u);
         break;
@@ -416,10 +435,32 @@ class SpaDecoder {
     }
   }
 
+  // The keypad has a big four-digit numeric display. Each display burst is four slots: line 1 (type 22, or 27 on the
+  // light adjust screen, or 23 at the start of edit mode), line 2 (21), the digits (type 25, or 20 on the main menu)
+  // and a flags byte (28). Type 25 carries a temperature (current, or the setpoint on the SET TEMP screens). Type 20
+  // is not decoded yet, so it is published as raw bytes to compare with what the digits really show.
+  void emit_digits_(const char *tag, const SpaFrame &f, SpaUpdate &u) {
+    std::string d = std::string("raw ") + tag + ": " + hex_(f.payload, f.len);
+    set_digits_(d, u);
+  }
+  void set_digits_(const std::string &d, SpaUpdate &u) {
+    if (d != last_digits_ || !pub_digits_) {
+      last_digits_ = d;
+      pub_digits_ = true;
+      u.has_digits = true;
+      u.digits = d;
+    }
+  }
+
   void handle_temperature_(const SpaFrame &f, SpaUpdate &u) {
     if (f.len < 2)
       return;
     float v = f.payload[0] + f.payload[1] / 100.0f;
+    {
+      char buf[16];
+      snprintf(buf, sizeof(buf), "%.2f", v);
+      set_digits_(buf, u);
+    }
     // On the SET TEMP menu item (line 1 "(^) (SET) (v)", line 2 "1. SET TEMP") and in setpoint edit mode
     // (same line 1, blank line 2) this frame carries the setpoint. On every other menu it is not used.
     // On the normal screens it is the current temperature.
@@ -569,11 +610,11 @@ class SpaDecoder {
   }
 
   SpaState state_;
-  std::string line1_, line2_, last_line1_, last_line2_, last_status_raw_, last_key_, last_pump_, last_color_;
+  std::string line1_, line2_, last_line1_, last_line2_, last_status_raw_, last_key_, last_pump_, last_color_, last_digits_;
   bool have_line2_{false};
   bool pub_line1_{false}, pub_line2_{false}, pub_set_{false}, pub_current_{false}, pub_light_{false},
       pub_status_{false}, pub_pump_{false}, pub_key_{false}, pub_color_{false}, pub_pump_running_{false},
-      pub_heater_{false}, pub_ozone_{false}, pub_pump2_{false}, pub_aux_{false};
+      pub_heater_{false}, pub_ozone_{false}, pub_pump2_{false}, pub_aux_{false}, pub_digits_{false};
   bool last_pump_running_{false}, last_heater_{false}, last_ozone_{false}, last_pump2_{false}, last_aux_{false};
   float last_set_{0}, last_current_{0}, last_light_{0};
   uint8_t last_status_bytes_[SPA_MAX_BODY]{};
@@ -590,11 +631,14 @@ class SpaDecoder {
 // on_slot() only transmits when the caller says it is being called within max_latency_us of the frame end.
 class SpaTxSequencer {
  public:
-  void configure(uint32_t hold_ms, uint32_t response_timeout_ms, uint32_t max_latency_us) {
+  void configure(uint32_t hold_ms, uint32_t response_timeout_ms, uint32_t max_latency_us, uint32_t spacing_ms = 400) {
     hold_ms_ = hold_ms;
     response_timeout_ms_ = response_timeout_ms;
     max_latency_us_ = max_latency_us;
+    cooldown_ms_ = spacing_ms;
   }
+
+  static bool is_nav(SpaKey k) { return k == SpaKey::UP || k == SpaKey::DOWN || k == SpaKey::SELECT; }
 
   // Number of key presses needed to reach the target pump 1 mode (the key cycles off -> auto -> on -> off).
   static int pump1_presses(uint8_t current, uint8_t target) { return (3 + (int) target - (int) current) % 3; }
@@ -626,6 +670,27 @@ class SpaTxSequencer {
     return true;
   }
 
+  // Navigation key press (up, down, select). Allowed on any screen, queued if another press is still running, and
+  // sent once with no retry and no effect check (what it does depends on the screen).
+  bool request_nav(SpaKey key, const SpaState &st) {
+    if (!is_nav(key)) {
+      error_ = "not a navigation key";
+      return false;
+    }
+    if (!st.known) {
+      error_ = "no status frame seen yet";
+      return false;
+    }
+    if (q_count_ >= QUEUE_MAX) {
+      error_ = "key queue is full";
+      return false;
+    }
+    queue_[(q_head_ + q_count_) % QUEUE_MAX] = key;
+    q_count_++;
+    error_ = "";
+    return true;
+  }
+
   // One raw press with no target (for the button entities).
   bool press_raw(SpaKey key, const SpaState &st, uint32_t now) {
     if (!precheck_(st))
@@ -634,7 +699,7 @@ class SpaTxSequencer {
     return true;
   }
 
-  bool busy() const { return phase_ != IDLE; }
+  bool busy() const { return phase_ != IDLE || q_count_ > 0; }
   const char *error() const { return error_; }
   uint32_t late_skips() const { return late_skips_; }
   uint32_t frames_sent() const { return frames_sent_; }
@@ -665,18 +730,23 @@ class SpaTxSequencer {
       *len = spa_encode_key(0, 0, 0, out, cap);
       if (*len == 0)
         return false;
-      set_phase_(AWAIT, now);
       frames_sent_++;
+      if (goal_ == Goal::NAV) {
+        last_done_ms_ = now;
+        finish_ok_(now);  // nothing to wait for: the screen decides what the key does
+      } else {
+        set_phase_(AWAIT, now);
+      }
       return true;
     }
     // NEED_DOWN
-    if ((uint32_t) (now - last_done_ms_) < COOLDOWN_MS)
+    if ((uint32_t) (now - last_done_ms_) < cooldown_ms_)
       return false;
-    if (goal_ != Goal::RAW && satisfied_(st)) {  // state changed by itself while we waited
+    if (has_target_() && satisfied_(st)) {  // state changed by itself while we waited
       finish_ok_(now);
       return false;
     }
-    if (!st.ui_known || st.ui_busy)
+    if (goal_ != Goal::NAV && (!st.ui_known || st.ui_busy))
       return false;  // wait for a display frame; update_() gives up after SLOT_TIMEOUT_MS
     uint8_t b0 = 0, b1 = 0;
     spa_key_bytes(key_, &b0, &b1);
@@ -697,8 +767,9 @@ class SpaTxSequencer {
 
  protected:
   enum Phase : uint8_t { IDLE, NEED_DOWN, HOLD, NEED_UP, AWAIT };
-  enum class Goal : uint8_t { NONE, PUMP1, PUMP2, AUX, RAW };
-  static const uint32_t COOLDOWN_MS = 300;
+  enum class Goal : uint8_t { NONE, PUMP1, PUMP2, AUX, RAW, NAV };
+  static const uint8_t QUEUE_MAX = 16;
+  bool has_target_() const { return goal_ == Goal::PUMP1 || goal_ == Goal::PUMP2 || goal_ == Goal::AUX; }
   static const uint32_t BUSY_TIMEOUT_MS = 5000;
   static const uint32_t SLOT_TIMEOUT_MS = 5000;
 
@@ -722,7 +793,7 @@ class SpaTxSequencer {
     attempts_left_ = attempts;
     presses_ = 0;
     started_ms_ = now;
-    last_done_ms_ = now - COOLDOWN_MS;  // first press may go straight away
+    last_done_ms_ = now - cooldown_ms_;  // first press may go straight away
     set_phase_(NEED_DOWN, now);
   }
 
@@ -753,17 +824,36 @@ class SpaTxSequencer {
         return st.pump2 != before_.pump2;
       case SpaKey::AUX:
         return st.aux != before_.aux;
+      default:
+        return false;
     }
-    return false;
+  }
+
+  void start_nav_(uint32_t now) {
+    key_ = queue_[q_head_];
+    q_head_ = (q_head_ + 1) % QUEUE_MAX;
+    q_count_--;
+    goal_ = Goal::NAV;
+    target_ = 0;
+    attempts_left_ = 1;
+    presses_ = 0;
+    started_ms_ = now;
+    set_phase_(NEED_DOWN, now);  // last_done_ms_ is kept so queued presses stay spaced out
   }
 
   void update_(uint32_t now, const SpaState &st) {
     switch (phase_) {
+      case IDLE:
+        if (q_count_ > 0)
+          start_nav_(now);
+        break;
       case NEED_DOWN:
       case NEED_UP:
         if ((uint32_t) (now - phase_since_ms_) > SLOT_TIMEOUT_MS) {
           if (late_skips_ != skips_at_phase_start_)
             fail_("no reply slot was fast enough (loop too slow)");
+          else if (goal_ == Goal::NAV)
+            fail_("no reply slot available");
           else if (!st.ui_known)
             fail_("no display frame seen, cannot tell if a menu is open");
           else if (st.ui_busy)
@@ -825,7 +915,9 @@ class SpaTxSequencer {
   uint8_t target_{0};
   int presses_{0};
   int attempts_left_{0};
-  uint32_t hold_ms_{150}, response_timeout_ms_{800}, max_latency_us_{1500};
+  uint32_t hold_ms_{150}, response_timeout_ms_{800}, max_latency_us_{1500}, cooldown_ms_{400};
+  SpaKey queue_[16]{};
+  uint8_t q_head_{0}, q_count_{0};
   uint32_t started_ms_{0}, t_down_{0}, last_done_ms_{0}, phase_since_ms_{0}, skips_at_phase_start_{0};
   bool effect_{false};
   SpaState before_;

@@ -13,6 +13,7 @@ CONF_DRY_RUN = "dry_run"
 CONF_KEY_HOLD = "key_hold"
 CONF_RESPONSE_TIMEOUT = "response_timeout"
 CONF_MAX_REPLY_LATENCY = "max_reply_latency"
+CONF_KEY_SPACING = "key_spacing"
 
 spa_power_ns = cg.esphome_ns.namespace("spa_power")
 SpaPowerComponent = spa_power_ns.class_(
@@ -34,6 +35,7 @@ CONFIG_SCHEMA = (
             cv.Optional(
                 CONF_MAX_REPLY_LATENCY, default="1500us"
             ): cv.positive_time_period_microseconds,
+            cv.Optional(CONF_KEY_SPACING, default="400ms"): cv.positive_time_period_milliseconds,
         }
     )
     .extend(cv.COMPONENT_SCHEMA)
@@ -63,3 +65,4 @@ async def to_code(config):
     cg.add(var.set_key_hold_ms(config[CONF_KEY_HOLD]))
     cg.add(var.set_response_timeout_ms(config[CONF_RESPONSE_TIMEOUT]))
     cg.add(var.set_max_reply_latency_us(config[CONF_MAX_REPLY_LATENCY]))
+    cg.add(var.set_key_spacing_ms(config[CONF_KEY_SPACING]))

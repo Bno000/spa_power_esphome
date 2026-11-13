@@ -11,6 +11,9 @@ SpaPowerKeyButton = spa_power_ns.class_(
 CONF_PUMP = "pump"
 CONF_PUMP2 = "pump2"
 CONF_AUX = "aux"
+CONF_UP = "up"
+CONF_DOWN = "down"
+CONF_SELECT = "select"
 
 CONFIG_SCHEMA = cv.Schema(
     {
@@ -20,6 +23,15 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_AUX): button.button_schema(
             SpaPowerKeyButton, icon="mdi:toggle-switch"
         ),
+        cv.Optional(CONF_UP): button.button_schema(
+            SpaPowerKeyButton, icon="mdi:arrow-up-bold"
+        ),
+        cv.Optional(CONF_DOWN): button.button_schema(
+            SpaPowerKeyButton, icon="mdi:arrow-down-bold"
+        ),
+        cv.Optional(CONF_SELECT): button.button_schema(
+            SpaPowerKeyButton, icon="mdi:keyboard-return"
+        ),
     }
 )
 
@@ -27,7 +39,14 @@ CONFIG_SCHEMA = cv.Schema(
 async def to_code(config):
     hub = await cg.get_variable(config[CONF_SPA_POWER_ID])
     # key numbers match SpaKey in spa_power_parser.h
-    for key, number in ((CONF_PUMP, 0), (CONF_PUMP2, 1), (CONF_AUX, 2)):
+    for key, number in (
+        (CONF_PUMP, 0),
+        (CONF_PUMP2, 1),
+        (CONF_AUX, 2),
+        (CONF_UP, 3),
+        (CONF_DOWN, 4),
+        (CONF_SELECT, 5),
+    ):
         if conf := config.get(key):
             btn = await button.new_button(conf)
             await cg.register_parented(btn, hub)

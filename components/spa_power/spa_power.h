@@ -34,6 +34,7 @@ class SpaPowerComponent : public Component, public uart::UARTDevice {
   void set_aux_binary_sensor(binary_sensor::BinarySensor *s) { this->aux_ = s; }
   void set_heater_binary_sensor(binary_sensor::BinarySensor *s) { this->heater_ = s; }
   void set_ozone_binary_sensor(binary_sensor::BinarySensor *s) { this->ozone_ = s; }
+  void set_big_digits_text_sensor(text_sensor::TextSensor *s) { this->big_digits_ = s; }
   void set_light_color_text_sensor(text_sensor::TextSensor *s) { this->light_color_ = s; }
 
   // Controls (only active with transmit: true; with dry_run: true they only log what they would send).
@@ -46,8 +47,9 @@ class SpaPowerComponent : public Component, public uart::UARTDevice {
   void set_key_hold_ms(uint32_t v) { this->key_hold_ms_ = v; }
   void set_response_timeout_ms(uint32_t v) { this->response_timeout_ms_ = v; }
   void set_max_reply_latency_us(uint32_t v) { this->max_reply_latency_us_ = v; }
+  void set_key_spacing_ms(uint32_t v) { this->key_spacing_ms_ = v; }
 
-  bool press_key(SpaKey key);                  // one raw key press
+  bool press_key(SpaKey key);                  // one key press (pump keys: raw; up, down, select: queued)
   bool request_pump1(uint8_t target);          // 0 off, 1 auto, 2 on: presses the key until the pump reports it
   bool request_toggle(SpaKey key, bool on);    // pump 2 or aux
 
@@ -70,6 +72,7 @@ class SpaPowerComponent : public Component, public uart::UARTDevice {
   uint32_t key_hold_ms_{150};
   uint32_t response_timeout_ms_{800};
   uint32_t max_reply_latency_us_{1500};
+  uint32_t key_spacing_ms_{400};
 
   sensor::Sensor *current_temperature_{nullptr};
   sensor::Sensor *set_temperature_{nullptr};
@@ -80,6 +83,7 @@ class SpaPowerComponent : public Component, public uart::UARTDevice {
   text_sensor::TextSensor *pump_state_{nullptr};
   text_sensor::TextSensor *status_raw_{nullptr};
   text_sensor::TextSensor *light_color_{nullptr};
+  text_sensor::TextSensor *big_digits_{nullptr};
   binary_sensor::BinarySensor *pump_running_{nullptr};
   binary_sensor::BinarySensor *heater_{nullptr};
   binary_sensor::BinarySensor *ozone_{nullptr};
@@ -90,7 +94,7 @@ class SpaPowerComponent : public Component, public uart::UARTDevice {
   select::Select *pump_select_{nullptr};
 };
 
-// One key press per button press (pump 1, pump 2 or aux key), no target state.
+// One key press per button press (pump 1, pump 2, aux, up, down or select), no target state.
 class SpaPowerKeyButton : public button::Button, public Parented<SpaPowerComponent> {
  public:
   void set_key(uint8_t k) { this->key_ = k; }

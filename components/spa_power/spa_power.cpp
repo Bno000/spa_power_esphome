@@ -22,7 +22,7 @@ static std::string hex_string(const uint8_t *p, size_t n) {
 void SpaPowerComponent::setup() {
   this->last_stats_ms_ = millis();
   this->last_pass_end_us_ = micros();
-  this->seq_.configure(this->key_hold_ms_, this->response_timeout_ms_, this->max_reply_latency_us_);
+  this->seq_.configure(this->key_hold_ms_, this->response_timeout_ms_, this->max_reply_latency_us_, this->key_spacing_ms_);
 }
 
 void SpaPowerComponent::loop() {
@@ -114,7 +114,7 @@ bool SpaPowerComponent::press_key(SpaKey key) {
     this->log_plan_("key press", key, 1);
     return true;
   }
-  bool ok = this->seq_.press_raw(key, st, millis());
+  bool ok = SpaTxSequencer::is_nav(key) ? this->seq_.request_nav(key, st) : this->seq_.press_raw(key, st, millis());
   if (!ok)
     ESP_LOGW(TAG, "key press refused: %s", this->seq_.error());
   return ok;
@@ -181,6 +181,8 @@ void SpaPowerComponent::publish_(const SpaUpdate &u) {
   }
   if (u.has_status_raw && this->status_raw_ != nullptr)
     this->status_raw_->publish_state(u.status_raw);
+  if (u.has_digits && this->big_digits_ != nullptr)
+    this->big_digits_->publish_state(u.digits);
   if (u.has_light_color && this->light_color_ != nullptr)
     this->light_color_->publish_state(u.light_color);
   if (u.has_pump_running && this->pump_running_ != nullptr)
@@ -208,9 +210,9 @@ void SpaPowerComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "  Transmit: %s%s", this->transmit_ ? "enabled" : "disabled",
                 this->transmit_ && this->dry_run_ ? " (DRY RUN, nothing is sent)" : "");
   if (this->transmit_) {
-    ESP_LOGCONFIG(TAG, "  Key hold: %u ms, response timeout: %u ms, max reply latency: %u us",
-                  (unsigned) this->key_hold_ms_, (unsigned) this->response_timeout_ms_,
-                  (unsigned) this->max_reply_latency_us_);
+    ESP_LOGCONFIG(TAG, "  Key hold: %u ms, spacing: %u ms, response timeout: %u ms, max reply latency: %u us",
+                  (unsigned) this->key_hold_ms_, (unsigned) this->key_spacing_ms_,
+                  (unsigned) this->response_timeout_ms_, (unsigned) this->max_reply_latency_us_);
   }
   LOG_SENSOR("  ", "Current temperature", this->current_temperature_);
   LOG_SENSOR("  ", "Set temperature", this->set_temperature_);
@@ -220,6 +222,7 @@ void SpaPowerComponent::dump_config() {
   LOG_TEXT_SENSOR("  ", "Key", this->key_);
   LOG_TEXT_SENSOR("  ", "Pump state", this->pump_state_);
   LOG_TEXT_SENSOR("  ", "Light colour (experimental)", this->light_color_);
+  LOG_TEXT_SENSOR("  ", "Big digits (diagnostic)", this->big_digits_);
   LOG_TEXT_SENSOR("  ", "Status raw", this->status_raw_);
   LOG_BINARY_SENSOR("  ", "Pump running", this->pump_running_);
   LOG_BINARY_SENSOR("  ", "Heater", this->heater_);
