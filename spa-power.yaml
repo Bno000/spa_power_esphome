@@ -28,19 +28,21 @@ logger:
 
 external_components:
   - source:
-      type: local
-      path: components
-    components: [spa_power]
+      type: git
+      url: https://github.com/Bno000/spa_power_esphome
+    refresh: 0s
 
 # RS485 transceiver: RO -> rx_pin. Tie DE and RE̅ low (receive only), or drive them low as below.
 output:
   - platform: gpio
-    pin: GPIO4
+    pin: GPIO0
     id: rs485_de_re
+
 
 uart:
   id: spa_uart
-  rx_pin: GPIO16                 # change to the pin wired to the transceiver's RO
+  rx_pin: GPIO20
+  tx_pin: GPIO21 # change to the pin wired to the transceiver's RO
   baud_rate: 19200
   data_bits: 8
   parity: NONE
