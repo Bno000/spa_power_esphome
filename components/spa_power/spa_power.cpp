@@ -23,6 +23,7 @@ void SpaPowerComponent::setup() {
   this->last_stats_ms_ = millis();
   this->last_pass_end_us_ = micros();
   this->seq_.configure(this->key_hold_ms_, this->response_timeout_ms_, this->max_reply_latency_us_, this->key_spacing_ms_);
+  this->setpoint_.configure(200);
 }
 
 void SpaPowerComponent::loop() {
@@ -46,8 +47,17 @@ void SpaPowerComponent::loop() {
   }
 
   if (tx_active) {
-    this->seq_.tick(millis(), this->decoder_.state());
+    const uint32_t tnow = millis();
+    this->seq_.tick(tnow, this->decoder_.state());
     this->report_result_();
+    if (this->setpoint_.active()) {
+      SpaKey k = SpaKey::UP;
+      if (this->setpoint_.tick(tnow, this->decoder_.state(), this->seq_.nav_done(), this->seq_.nav_failed(), &k)) {
+        if (!this->seq_.request_nav(k, this->decoder_.state()))
+          this->setpoint_.key_refused(this->seq_.error(), tnow);
+      }
+    }
+    this->report_setpoint_result_();
     // While a key action is running, run the loop as fast as possible so the reply slot is not missed.
     if (this->seq_.busy())
       this->high_freq_.start();
@@ -77,6 +87,16 @@ void SpaPowerComponent::try_slot_(uint32_t now_ms) {
   this->write_array(buf, len);
   this->flush();
   ESP_LOGD(TAG, "sent %s (slot latency <= %u us)", hex_string(buf, len).c_str(), (unsigned) latency_us);
+}
+
+void SpaPowerComponent::report_setpoint_result_() {
+  std::string msg;
+  if (!this->setpoint_.take_result(&msg))
+    return;
+  if (this->setpoint_.last_ok())
+    ESP_LOGI(TAG, "setpoint: %s", msg.c_str());
+  else
+    ESP_LOGW(TAG, "setpoint change failed: %s", msg.c_str());
 }
 
 void SpaPowerComponent::report_result_() {
@@ -109,6 +129,10 @@ void SpaPowerComponent::log_plan_(const char *what, SpaKey key, int presses) {
 bool SpaPowerComponent::press_key(SpaKey key) {
   if (!this->check_tx_("key press"))
     return false;
+  if (SpaTxSequencer::is_nav(key) && this->setpoint_.active()) {
+    ESP_LOGW(TAG, "key press refused: a setpoint change is running");
+    return false;
+  }
   const SpaState &st = this->decoder_.state();
   if (this->dry_run_) {
     this->log_plan_("key press", key, 1);
@@ -158,6 +182,31 @@ bool SpaPowerComponent::request_toggle(SpaKey key, bool on) {
   return ok;
 }
 
+bool SpaPowerComponent::request_setpoint(float target, float min_v, float max_v) {
+  if (!this->check_tx_("setpoint"))
+    return false;
+  const SpaState &st = this->decoder_.state();
+  if (this->dry_run_) {
+    if (!st.known || !st.set_known) {
+      ESP_LOGW(TAG, "DRY RUN setpoint: no status or setpoint read yet");
+      return false;
+    }
+    float t = roundf(target / SpaSetpointController::STEP) * SpaSetpointController::STEP;
+    int steps = (int) (fabsf(t - st.set_value) / SpaSetpointController::STEP + 0.5f);
+    ESP_LOGI(TAG, "DRY RUN setpoint %.2f -> %.2f: select, up, select, then %d x %s, select (nothing sent)", st.set_value,
+             t, steps, t >= st.set_value ? "up" : "down");
+    return true;
+  }
+  if (this->seq_.busy()) {
+    ESP_LOGW(TAG, "setpoint request refused: a key action is still running");
+    return false;
+  }
+  bool ok = this->setpoint_.request(target, min_v, max_v, st, millis());
+  if (!ok)
+    ESP_LOGW(TAG, "setpoint request refused: %s", this->setpoint_.error());
+  return ok;
+}
+
 void SpaPowerComponent::publish_(const SpaUpdate &u) {
   for (const auto &n : u.notes)
     ESP_LOGI(TAG, "%s", n.c_str());
@@ -165,6 +214,8 @@ void SpaPowerComponent::publish_(const SpaUpdate &u) {
     this->current_temperature_->publish_state(u.current_temp);
   if (u.has_set_temp && this->set_temperature_ != nullptr)
     this->set_temperature_->publish_state(u.set_temp);
+  if (u.has_set_temp && this->setpoint_number_ != nullptr)
+    this->setpoint_number_->publish_state(u.set_temp);
   if (u.has_light && this->light_level_ != nullptr)
     this->light_level_->publish_state(u.light_percent);
   if (u.has_line1 && this->line1_ != nullptr)
@@ -233,6 +284,10 @@ void SpaPowerComponent::dump_config() {
 }
 
 void SpaPowerKeyButton::press_action() { this->parent_->press_key(static_cast<SpaKey>(this->key_)); }
+
+void SpaPowerSetpointNumber::control(float value) {
+  this->parent_->request_setpoint(value, this->traits.get_min_value(), this->traits.get_max_value());
+}
 
 void SpaPowerSwitch::write_state(bool state) {
   // The displayed state follows what the controller reports, so it is not published here.

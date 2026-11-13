@@ -5,7 +5,7 @@ from esphome.const import CONF_ID
 
 CODEOWNERS = []
 DEPENDENCIES = ["uart"]
-AUTO_LOAD = ["binary_sensor", "button", "select", "sensor", "switch", "text_sensor"]
+AUTO_LOAD = ["binary_sensor", "button", "number", "select", "sensor", "switch", "text_sensor"]
 
 CONF_SPA_POWER_ID = "spa_power_id"
 CONF_TRANSMIT = "transmit"

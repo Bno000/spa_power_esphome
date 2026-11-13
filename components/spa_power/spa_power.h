@@ -4,6 +4,7 @@
 #include "esphome/core/helpers.h"
 #include "esphome/components/binary_sensor/binary_sensor.h"
 #include "esphome/components/button/button.h"
+#include "esphome/components/number/number.h"
 #include "esphome/components/select/select.h"
 #include "esphome/components/sensor/sensor.h"
 #include "esphome/components/switch/switch.h"
@@ -41,6 +42,7 @@ class SpaPowerComponent : public Component, public uart::UARTDevice {
   void set_pump2_switch(switch_::Switch *s) { this->pump2_switch_ = s; }
   void set_aux_switch(switch_::Switch *s) { this->aux_switch_ = s; }
   void set_pump_select(select::Select *s) { this->pump_select_ = s; }
+  void set_setpoint_number(number::Number *n) { this->setpoint_number_ = n; }
 
   void set_transmit(bool v) { this->transmit_ = v; }
   void set_dry_run(bool v) { this->dry_run_ = v; }
@@ -52,17 +54,20 @@ class SpaPowerComponent : public Component, public uart::UARTDevice {
   bool press_key(SpaKey key);                  // one key press (pump keys: raw; up, down, select: queued)
   bool request_pump1(uint8_t target);          // 0 off, 1 auto, 2 on: presses the key until the pump reports it
   bool request_toggle(SpaKey key, bool on);    // pump 2 or aux
+  bool request_setpoint(float target, float min_v, float max_v);  // drives the keypad: select, up, select, arrows, select
 
  protected:
   void publish_(const SpaUpdate &u);
   void try_slot_(uint32_t now_ms);
   void report_result_();
+  void report_setpoint_result_();
   bool check_tx_(const char *what);
   void log_plan_(const char *what, SpaKey key, int presses);
 
   SpaFrameParser parser_;
   SpaDecoder decoder_;
   SpaTxSequencer seq_;
+  SpaSetpointController setpoint_;
   HighFrequencyLoopRequester high_freq_;
   uint32_t last_stats_ms_{0};
   uint32_t last_pass_end_us_{0};
@@ -92,6 +97,7 @@ class SpaPowerComponent : public Component, public uart::UARTDevice {
   switch_::Switch *pump2_switch_{nullptr};
   switch_::Switch *aux_switch_{nullptr};
   select::Select *pump_select_{nullptr};
+  number::Number *setpoint_number_{nullptr};
 };
 
 // One key press per button press (pump 1, pump 2, aux, up, down or select), no target state.
@@ -112,6 +118,12 @@ class SpaPowerSwitch : public switch_::Switch, public Parented<SpaPowerComponent
  protected:
   void write_state(bool state) override;
   uint8_t key_{1};
+};
+
+// Target temperature. Setting it runs the keypad sequence; the value shown is what the controller reports.
+class SpaPowerSetpointNumber : public number::Number, public Parented<SpaPowerComponent> {
+ protected:
+  void control(float value) override;
 };
 
 // Pump 1 mode: off / auto / on.

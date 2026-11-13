@@ -211,6 +211,9 @@ static inline void spa_key_bytes(SpaKey k, uint8_t *b0, uint8_t *b1) {
   }
 }
 
+// Which keypad screen the display bursts say is showing.
+enum class SpaScreen : uint8_t { UNKNOWN, NORMAL, MAIN_MENU, SET_ITEM, EDIT, OTHER };
+
 // What the controller currently reports (decoded from the status frame and the display text).
 struct SpaState {
   bool known{false};    // at least one status frame decoded
@@ -219,6 +222,12 @@ struct SpaState {
   bool aux{false};
   bool ui_known{false};  // at least one display frame seen, so ui_busy is meaningful
   bool ui_busy{false};   // a menu, edit or adjust screen is showing: pump and aux keys may mean something else
+  SpaScreen screen{SpaScreen::UNKNOWN};
+  bool burst_complete{false};  // the last display burst has finished (its flags frame, type 28, arrived)
+  bool set_known{false};       // the setpoint has been read (from the text or the SET TEMP screens)
+  float set_value{0};
+  bool edit_known{false};      // the number shown on the SET TEMP menu item / edit screen
+  float edit_value{0};
 };
 
 // Values that changed because of one frame. Only fields with has_* set should be published.
@@ -262,13 +271,17 @@ class SpaDecoder {
   const SpaState &state() const { return state_; }
 
   void process(const SpaFrame &f, SpaUpdate &u) {
+    if (f.type == 0x28)
+      state_.burst_complete = true;  // the flags frame ends a display burst
     switch (f.type) {
       case 0x22:  // display line 1 (15 ASCII chars); normally starts a display burst
         line1_ = ascii_(f.payload, f.len);
         line2_.clear();
         have_line2_ = false;
         state_.ui_known = true;
+        state_.burst_complete = false;
         state_.ui_busy = line1_.find("(^)") != std::string::npos;  // menu navigation line
+        update_screen_();
         handle_line1_(f, u);
         break;
       case 0x27:  // takes the place of line 1 on the LIGHT ADJUST screen
@@ -277,7 +290,9 @@ class SpaDecoder {
         line2_.clear();
         have_line2_ = false;
         state_.ui_known = true;
+        state_.burst_complete = false;
         state_.ui_busy = true;
+        update_screen_();
         break;
       case 0x21: {  // display line 2
         std::string raw = ascii_(f.payload, f.len);
@@ -289,6 +304,7 @@ class SpaDecoder {
               up2.find("MAIN MENU") != std::string::npos || up2.find("SET TEMP") != std::string::npos)
             state_.ui_busy = true;
         }
+        update_screen_();
         std::string t = trim_(raw);
         if (t != last_line2_ || !pub_line2_) {
           last_line2_ = t;
@@ -426,7 +442,29 @@ class SpaDecoder {
     }
   }
 
+  // Screen from line 1 and line 2 of the current burst. Line 1 alone cannot tell the SET TEMP menu item from edit mode
+  // (same line 1; line 2 is "1. SET TEMP" or blank), so the final answer comes when line 2 arrives.
+  void update_screen_() {
+    bool nav = line1_.find("(^)") != std::string::npos;
+    if (!nav) {
+      state_.screen = state_.ui_busy ? SpaScreen::OTHER : SpaScreen::NORMAL;
+    } else if (line1_.find("(ESC)") != std::string::npos) {
+      state_.screen = SpaScreen::MAIN_MENU;
+    } else if (line1_.find("(SET)") != std::string::npos) {
+      if (upper_(line2_).find("SET TEMP") != std::string::npos)
+        state_.screen = SpaScreen::SET_ITEM;
+      else if (have_line2_ && trim_(line2_).empty())
+        state_.screen = SpaScreen::EDIT;
+      else
+        state_.screen = SpaScreen::OTHER;  // line 2 not here yet
+    } else {
+      state_.screen = SpaScreen::OTHER;
+    }
+  }
+
   void emit_set_(float v, SpaUpdate &u) {
+    state_.set_known = true;
+    state_.set_value = v;
     if (!pub_set_ || fabsf(v - last_set_) > 0.001f) {
       pub_set_ = true;
       last_set_ = v;
@@ -479,8 +517,11 @@ class SpaDecoder {
     if (menu_line) {
       bool set_item = line1_.find("(SET)") != std::string::npos &&
                       (upper_(line2_).find("SET TEMP") != std::string::npos || (have_line2_ && trim_(line2_).empty()));
-      if (set_item)
+      if (set_item) {
+        state_.edit_known = true;
+        state_.edit_value = v;
         emit_set_(v, u);
+      }
       return;
     }
     if (!pub_current_ || fabsf(v - last_current_) > 0.001f) {
@@ -713,6 +754,8 @@ class SpaTxSequencer {
   bool busy() const { return phase_ != IDLE || q_count_ > 0; }
   const char *error() const { return error_; }
   uint32_t late_skips() const { return late_skips_; }
+  uint32_t nav_done() const { return nav_done_; }      // navigation presses fully sent (key-down and release)
+  uint32_t nav_failed() const { return nav_failed_; }  // navigation presses that could not be sent
   uint32_t frames_sent() const { return frames_sent_; }
 
   bool take_result(std::string *msg) {
@@ -904,6 +947,8 @@ class SpaTxSequencer {
   }
 
   void finish_ok_(uint32_t now) {
+    if (goal_ == Goal::NAV)
+      nav_done_++;
     char buf[64];
     snprintf(buf, sizeof(buf), "done after %d press(es), %u ms", presses_, (unsigned) (now - started_ms_));
     result_ = buf;
@@ -913,6 +958,8 @@ class SpaTxSequencer {
   }
 
   void fail_(const char *why) {
+    if (goal_ == Goal::NAV)
+      nav_failed_++;
     result_ = why;
     error_ = why;
     last_ok_ = false;
@@ -935,7 +982,231 @@ class SpaTxSequencer {
   const char *error_{""};
   std::string result_;
   bool have_result_{false}, last_ok_{false};
-  uint32_t late_skips_{0}, frames_sent_{0};
+  uint32_t late_skips_{0}, frames_sent_{0}, nav_done_{0}, nav_failed_{0};
+};
+
+// Sets the temperature by driving the keypad: select (open the main menu), up (to "1. SET TEMP"), select (edit mode),
+// up or down one 0.25 C step per press, select (leave). Every step looks at the screen and the number the controller
+// shows, so a lost or doubled key press is corrected instead of counted blindly. Keys are handed to a callback-free
+// interface: tick() says which key to press next, and the caller queues it on the SpaTxSequencer.
+class SpaSetpointController {
+ public:
+  void configure(uint32_t settle_ms) { settle_ms_ = settle_ms; }
+
+  static constexpr float STEP = 0.25f;
+  static constexpr int MAX_STEPS = 80;  // largest change accepted: 20 C
+
+  bool request(float target, float min_v, float max_v, const SpaState &st, uint32_t now) {
+    if (active()) {
+      error_ = "a setpoint change is already running";
+      return false;
+    }
+    if (!st.known || !st.ui_known || !st.set_known) {
+      error_ = "no status, display or setpoint read yet";
+      return false;
+    }
+    if (st.screen != SpaScreen::NORMAL) {
+      error_ = "the keypad is not on the normal screen";
+      return false;
+    }
+    if (!(min_v < max_v)) {
+      error_ = "min must be below max";
+      return false;
+    }
+    float t = roundf(target / STEP) * STEP;
+    if (t < min_v - 0.001f || t > max_v + 0.001f) {
+      error_ = "target is outside the allowed range";
+      return false;
+    }
+    float steps = fabsf(t - st.set_value) / STEP;
+    if (steps > MAX_STEPS) {
+      error_ = "change is too large";
+      return false;
+    }
+    error_ = "";
+    target_ = t;
+    start_value_ = st.set_value;
+    if (steps < 0.5f) {
+      set_result_(true, "setpoint is already there");
+      return true;
+    }
+    planned_steps_ = (int) (steps + 0.5f);
+    stage_ = SEND;
+    recovering_ = false;
+    entered_edit_ = false;
+    attempts_ = 0;
+    keys_sent_ = 0;
+    recover_keys_ = 0;
+    started_ms_ = now;
+    return true;
+  }
+
+  bool active() const { return stage_ != IDLE; }
+  const char *error() const { return error_; }
+  float target() const { return target_; }
+  int keys_sent() const { return keys_sent_; }
+  bool take_result(std::string *msg) {
+    if (!have_result_)
+      return false;
+    have_result_ = false;
+    *msg = result_;
+    return true;
+  }
+  bool last_ok() const { return last_ok_; }
+
+  // The caller could not queue the key we asked for.
+  void key_refused(const char *why, uint32_t now) {
+    (void) now;
+    begin_recovery_(why);
+  }
+
+  // Call every loop pass. Returns true and fills *key when the next key must be queued now.
+  bool tick(uint32_t now, const SpaState &st, uint32_t nav_done, uint32_t nav_failed, SpaKey *key) {
+    if (stage_ == IDLE)
+      return false;
+    if ((uint32_t) (now - started_ms_) > TOTAL_TIMEOUT_MS && !recovering_) {
+      begin_recovery_("took too long");
+    }
+    if (stage_ == SEND) {
+      if (!st.burst_complete)
+        return false;  // wait for a complete display burst: the screen is only reliable between bursts
+      SpaKey k;
+      int what = decide_(st, &k);
+      if (what == 0)
+        return false;  // finished or failed inside decide_()
+      if (what == 2)
+        return false;  // waiting for a value that has not been read yet
+      before_ = st;
+      *key = k;
+      key_ = k;
+      baseline_done_ = nav_done;
+      baseline_fail_ = nav_failed;
+      done_seen_ms_ = 0;
+      stage_ = WAIT;
+      keys_sent_++;
+      if (recovering_)
+        recover_keys_++;
+      return true;
+    }
+    // WAIT: the key must be fully sent, then give the display a moment to answer
+    if (nav_failed != baseline_fail_) {
+      stage_ = SEND;
+      attempts_++;
+      if (attempts_ >= 3)
+        begin_recovery_("a key press could not be sent");
+      return false;
+    }
+    if (nav_done == baseline_done_)
+      return false;
+    if (done_seen_ms_ == 0)
+      done_seen_ms_ = now ? now : 1;
+    if ((uint32_t) (now - done_seen_ms_) < settle_ms_ || !st.burst_complete)
+      return false;
+    bool progressed = st.screen != before_.screen || fabsf(st.edit_value - before_.edit_value) > 0.01f ||
+                      fabsf(st.set_value - before_.set_value) > 0.01f;
+    attempts_ = progressed ? 0 : attempts_ + 1;
+    stage_ = SEND;
+    if (attempts_ >= 3)
+      begin_recovery_("the keypad did not respond to the key presses");
+    return false;
+  }
+
+ protected:
+  enum Stage : uint8_t { IDLE, SEND, WAIT };
+  static const uint32_t TOTAL_TIMEOUT_MS = 90000;
+
+  // 0 = nothing to press (done or failed), 1 = press *k, 2 = wait
+  int decide_(const SpaState &st, SpaKey *k) {
+    if (keys_sent_ > 40 + 2 * planned_steps_) {
+      begin_recovery_("too many key presses");
+      if (!recovering_)
+        return 0;
+    }
+    if (recovering_) {
+      if (recover_keys_ >= 6) {
+        finish_(false, "could not get back to the normal screen");
+        return 0;
+      }
+      switch (st.screen) {
+        case SpaScreen::NORMAL:
+          finish_(false, fail_reason_ + "; the keypad is back on the normal screen");
+          return 0;
+        case SpaScreen::MAIN_MENU:
+        case SpaScreen::SET_ITEM:
+        case SpaScreen::EDIT:
+          *k = SpaKey::SELECT;  // main menu: ESC, edit: leave, set item: enter edit (the next select leaves it)
+          return 1;
+        default:
+          finish_(false, fail_reason_ + "; the keypad is on a screen I do not know how to leave");
+          return 0;
+      }
+    }
+    switch (st.screen) {
+      case SpaScreen::NORMAL:
+        if (!entered_edit_) {
+          *k = SpaKey::SELECT;
+          return 1;
+        }
+        if (fabsf(st.set_value - target_) < 0.01f) {
+          char buf[80];
+          snprintf(buf, sizeof(buf), "setpoint is now %.2f after %d key presses", st.set_value, keys_sent_);
+          finish_(true, buf);
+        } else {
+          char buf[80];
+          snprintf(buf, sizeof(buf), "setpoint reads %.2f, expected %.2f", st.set_value, target_);
+          finish_(false, buf);
+        }
+        return 0;
+      case SpaScreen::MAIN_MENU:
+        *k = SpaKey::UP;
+        return 1;
+      case SpaScreen::SET_ITEM:
+        *k = SpaKey::SELECT;
+        return 1;
+      case SpaScreen::EDIT:
+        entered_edit_ = true;
+        if (!st.edit_known)
+          return 2;
+        if (fabsf(st.edit_value - target_) < 0.01f)
+          *k = SpaKey::SELECT;
+        else
+          *k = st.edit_value < target_ ? SpaKey::UP : SpaKey::DOWN;
+        return 1;
+      default:
+        begin_recovery_("the keypad showed a screen I did not expect");
+        if (!recovering_)
+          return 0;
+        return 2;
+    }
+  }
+
+  void begin_recovery_(const char *why) {
+    if (recovering_)
+      return;
+    recovering_ = true;
+    fail_reason_ = why;
+    attempts_ = 0;
+    if (stage_ == WAIT)
+      stage_ = SEND;
+  }
+
+  void finish_(bool ok, const std::string &msg) { set_result_(ok, msg); stage_ = IDLE; }
+  void set_result_(bool ok, const std::string &msg) {
+    result_ = msg;
+    last_ok_ = ok;
+    have_result_ = true;
+  }
+
+  Stage stage_{IDLE};
+  SpaKey key_{SpaKey::UP};
+  float target_{0}, start_value_{0};
+  int planned_steps_{0}, keys_sent_{0}, recover_keys_{0}, attempts_{0};
+  bool recovering_{false}, entered_edit_{false};
+  uint32_t settle_ms_{200}, started_ms_{0}, done_seen_ms_{0}, baseline_done_{0}, baseline_fail_{0};
+  SpaState before_;
+  const char *error_{""};
+  std::string result_, fail_reason_;
+  bool have_result_{false}, last_ok_{false};
 };
 
 }  // namespace spa_power
