@@ -62,7 +62,7 @@ sensor:
       name: "Spa Set Temperature"
     light_level:
       name: "Spa Light Level"
-
+ 
 text_sensor:
   - platform: spa_power
     spa_power_id: spa
@@ -73,7 +73,9 @@ text_sensor:
     key:
       name: "Spa Last Key"
     pump_state:
-      name: "Spa Pump (experimental)"
+      name: "Spa Pump"
+    light_color:
+      name: "Spa Light Colour (experimental)"
     status_raw:
       name: "Spa Status Raw"
       entity_category: diagnostic
