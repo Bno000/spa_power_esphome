@@ -11,7 +11,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <string>
+#include <vector>
 
 namespace esphome {
 namespace spa_power {
@@ -146,6 +148,10 @@ struct SpaUpdate {
   std::string pump;
   bool has_status_raw{false};
   std::string status_raw;
+  bool has_light_color{false};
+  std::string light_color;
+  // Human readable change log lines (status bit diffs, other frame changes, key presses) for state mapping.
+  std::vector<std::string> notes;
 };
 
 class SpaDecoder {
@@ -183,12 +189,18 @@ class SpaDecoder {
       case 0x30:
         handle_status_(f, u);
         break;
+      case 0x31:
+        handle_color_(f, u);
+        break;
       case 0x80:
         handle_key_(f, u);
         break;
       default:
         break;
     }
+    // Every type except the ones with dedicated entities is change-logged for state mapping.
+    if (f.type != 0x21 && f.type != 0x22 && f.type != 0x25 && f.type != 0x30 && f.type != 0x80)
+      note_other_(f, u);
   }
 
  protected:
@@ -232,6 +244,47 @@ class SpaDecoder {
       s += buf;
     }
     return s;
+  }
+
+  // "b2 03->43 (+40)": byte index, old->new, and the bits that turned on (+) or off (-).
+  static std::string diff_(const uint8_t *a, size_t an, const uint8_t *b, size_t bn) {
+    std::string out;
+    size_t n = an < bn ? an : bn;
+    char buf[48];
+    for (size_t i = 0; i < n; i++) {
+      if (a[i] == b[i])
+        continue;
+      uint8_t on = b[i] & ~a[i], off = a[i] & ~b[i];
+      snprintf(buf, sizeof(buf), "b%u %02x->%02x (", (unsigned) i, a[i], b[i]);
+      if (!out.empty())
+        out += ", ";
+      out += buf;
+      if (on) {
+        snprintf(buf, sizeof(buf), "+%02x", on);
+        out += buf;
+      }
+      if (off) {
+        snprintf(buf, sizeof(buf), "%s-%02x", on ? " " : "", off);
+        out += buf;
+      }
+      out += ")";
+    }
+    if (an != bn)
+      out += (out.empty() ? "" : ", ") + std::string("length changed");
+    return out;
+  }
+
+  void note_other_(const SpaFrame &f, SpaUpdate &u) {
+    std::string now = f.len ? hex_(f.payload, f.len) : std::string("(empty)");
+    auto it = last_other_.find(f.type);
+    char buf[24];
+    snprintf(buf, sizeof(buf), "type %02x: ", f.type);
+    if (it == last_other_.end()) {
+      u.notes.push_back(std::string(buf) + now + " (first seen)");
+    } else if (it->second != now) {
+      u.notes.push_back(std::string(buf) + it->second + " -> " + now);
+    }
+    last_other_[f.type] = now;
   }
 
   void handle_line1_(const SpaFrame &f, SpaUpdate &u) {
@@ -291,6 +344,10 @@ class SpaDecoder {
     if (f.len < 11)
       return;
     std::string raw = hex_(f.payload, f.len);
+    if (pub_status_ && raw != last_status_raw_)
+      u.notes.push_back("status change: " + diff_(last_status_bytes_, last_status_len_, f.payload, f.len));
+    memcpy(last_status_bytes_, f.payload, f.len);
+    last_status_len_ = f.len;
     if (raw != last_status_raw_ || !pub_status_) {
       last_status_raw_ = raw;
       pub_status_ = true;
@@ -313,6 +370,22 @@ class SpaDecoder {
       pub_pump_ = true;
       u.has_pump = true;
       u.pump = pump;
+    }
+  }
+
+  // EXPERIMENTAL: three bytes that sit at 55 55 55 normally and change while a colour-changing light mode runs
+  // (seen ff 00 00, 00 00 ff, 80 00 80, 00 55 aa). Byte order (RGB or another order) is not verified.
+  void handle_color_(const SpaFrame &f, SpaUpdate &u) {
+    if (f.len < 3)
+      return;
+    char buf[12];
+    snprintf(buf, sizeof(buf), "#%02x%02x%02x", f.payload[0], f.payload[1], f.payload[2]);
+    std::string c = buf;
+    if (c != last_color_ || !pub_color_) {
+      last_color_ = c;
+      pub_color_ = true;
+      u.has_light_color = true;
+      u.light_color = c;
     }
   }
 
@@ -342,6 +415,8 @@ class SpaDecoder {
       snprintf(buf, sizeof(buf), "unknown_%02x_%02x", b0, b1);
       name = buf;
     }
+    if (name != "none" && (name != last_key_ || last_key_ == "none"))
+      u.notes.push_back("key " + name);
     if (name != last_key_ || !pub_key_) {
       last_key_ = name;
       pub_key_ = true;
@@ -350,11 +425,14 @@ class SpaDecoder {
     }
   }
 
-  std::string line1_, line2_, last_line1_, last_line2_, last_status_raw_, last_key_, last_pump_;
+  std::string line1_, line2_, last_line1_, last_line2_, last_status_raw_, last_key_, last_pump_, last_color_;
   bool have_line2_{false};
   bool pub_line1_{false}, pub_line2_{false}, pub_set_{false}, pub_current_{false}, pub_light_{false},
-      pub_status_{false}, pub_pump_{false}, pub_key_{false};
+      pub_status_{false}, pub_pump_{false}, pub_key_{false}, pub_color_{false};
   float last_set_{0}, last_current_{0}, last_light_{0};
+  uint8_t last_status_bytes_[SPA_MAX_BODY]{};
+  size_t last_status_len_{0};
+  std::map<uint8_t, std::string> last_other_;
 };
 
 }  // namespace spa_power
