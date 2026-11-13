@@ -24,6 +24,7 @@ class SpaPowerComponent : public Component, public uart::UARTDevice {
   void set_key_text_sensor(text_sensor::TextSensor *s) { this->key_ = s; }
   void set_pump_state_text_sensor(text_sensor::TextSensor *s) { this->pump_state_ = s; }
   void set_status_raw_text_sensor(text_sensor::TextSensor *s) { this->status_raw_ = s; }
+  void set_light_color_text_sensor(text_sensor::TextSensor *s) { this->light_color_ = s; }
 
  protected:
   void publish_(const SpaUpdate &u);
@@ -40,6 +41,7 @@ class SpaPowerComponent : public Component, public uart::UARTDevice {
   text_sensor::TextSensor *key_{nullptr};
   text_sensor::TextSensor *pump_state_{nullptr};
   text_sensor::TextSensor *status_raw_{nullptr};
+  text_sensor::TextSensor *light_color_{nullptr};
 };
 
 }  // namespace spa_power
