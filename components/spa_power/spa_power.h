@@ -2,6 +2,7 @@
 
 #include "esphome/core/component.h"
 #include "esphome/components/uart/uart.h"
+#include "esphome/components/binary_sensor/binary_sensor.h"
 #include "esphome/components/sensor/sensor.h"
 #include "esphome/components/text_sensor/text_sensor.h"
 #include "spa_power_parser.h"
@@ -24,6 +25,11 @@ class SpaPowerComponent : public Component, public uart::UARTDevice {
   void set_key_text_sensor(text_sensor::TextSensor *s) { this->key_ = s; }
   void set_pump_state_text_sensor(text_sensor::TextSensor *s) { this->pump_state_ = s; }
   void set_status_raw_text_sensor(text_sensor::TextSensor *s) { this->status_raw_ = s; }
+  void set_pump_running_binary_sensor(binary_sensor::BinarySensor *s) { this->pump_running_ = s; }
+  void set_pump2_running_binary_sensor(binary_sensor::BinarySensor *s) { this->pump2_running_ = s; }
+  void set_aux_binary_sensor(binary_sensor::BinarySensor *s) { this->aux_ = s; }
+  void set_heater_binary_sensor(binary_sensor::BinarySensor *s) { this->heater_ = s; }
+  void set_ozone_binary_sensor(binary_sensor::BinarySensor *s) { this->ozone_ = s; }
   void set_light_color_text_sensor(text_sensor::TextSensor *s) { this->light_color_ = s; }
 
  protected:
@@ -42,6 +48,11 @@ class SpaPowerComponent : public Component, public uart::UARTDevice {
   text_sensor::TextSensor *pump_state_{nullptr};
   text_sensor::TextSensor *status_raw_{nullptr};
   text_sensor::TextSensor *light_color_{nullptr};
+  binary_sensor::BinarySensor *pump_running_{nullptr};
+  binary_sensor::BinarySensor *heater_{nullptr};
+  binary_sensor::BinarySensor *ozone_{nullptr};
+  binary_sensor::BinarySensor *pump2_running_{nullptr};
+  binary_sensor::BinarySensor *aux_{nullptr};
 };
 
 }  // namespace spa_power
